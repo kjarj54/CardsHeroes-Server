@@ -419,9 +419,15 @@ export class MyRoom extends Room<MyRoomState> {
   // -------- Starter y combates --------
   private startStarterPhase() {
     this.state.game.phase = "starter_p1";
+    const players = Array.from(this.state.players.values());
+    const p1 = players.find((p) => p.playerId === 1);
+    const p2 = players.find((p) => p.playerId === 2);
+    
     this.broadcast("starter_phase", {
       currentPlayer: 1,
       message: "Player 1: Select a card to determine who starts",
+      p1Credits: p1?.credits || 100,
+      p2Credits: p2?.credits || 100
     });
   }
 
@@ -477,14 +483,22 @@ export class MyRoom extends Room<MyRoomState> {
         message: "Choose opponent's card to battle",
       });
     } else if (phase === "choose_opponent") {
-      if (player.playerId === this.state.game.currentTurn) return;
-      if (player.usedCards[cardIndex] || player.blockedCards[cardIndex]) return;
+      // El jugador actual elige la carta del oponente para batallar
+      if (player.playerId !== this.state.game.currentTurn) return;
+      
+      // Obtener el oponente
+      const opponentId = this.state.game.currentTurn === 1 ? 2 : 1;
+      const opponent = this.getPlayer(opponentId);
+      if (!opponent) return;
+      
+      // Verificar que la carta del oponente no esté usada o bloqueada
+      if (opponent.usedCards[cardIndex] || opponent.blockedCards[cardIndex]) return;
 
       this.state.game.selectedOpponent = cardIndex;
       this.broadcast("card_revealed", {
-        playerId: player.playerId,
+        playerId: opponentId,
         cardIndex,
-        cardId: player.hand[cardIndex],
+        cardId: opponent.hand[cardIndex],
       });
       this.resolveBattle();
     }
@@ -519,6 +533,8 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.game.battleDiff = diff;
     this.state.game.afterStarter = true;
     this.state.game.currentTurn = winner === 0 ? 1 : winner; // si empatan, arranca P1
+
+    console.log(`⚔️ Starter battle: P1(${p1CardId}=${p1Power}) vs P2(${p2CardId}=${p2Power}), winner: ${winner}`);
 
     // Notificar resultado del VS inicial
     this.broadcast("starter_battle_result", {
@@ -642,6 +658,8 @@ export class MyRoom extends Room<MyRoomState> {
       newScore: player.score,
       operation: op,
       diff,
+      p1Credits: this.getPlayer(1)?.credits || 100,
+      p2Credits: this.getPlayer(2)?.credits || 100
     });
 
     if (this.state.game.afterStarter) this.finishStarterBattle();
@@ -658,10 +676,25 @@ export class MyRoom extends Room<MyRoomState> {
       nextTurn: this.state.game.currentTurn,
       message: `Player ${this.state.game.currentTurn}: Choose your card`,
     });
+    
+    // Enviar inmediatamente la fase de elección
+    setTimeout(() => {
+      this.broadcast("choose_self", {
+        currentPlayer: this.state.game.currentTurn,
+        message: `Player ${this.state.game.currentTurn}: Choose your card`,
+      });
+    }, 1500);
   }
 
   private finishBattle() {
-    this.state.game.currentTurn = this.state.game.currentTurn === 1 ? 2 : 1;
+    // Solo cambiar turno si el jugador actual perdió
+    if (this.state.game.battleWinner !== this.state.game.currentTurn && this.state.game.battleWinner !== 0) {
+      console.log(`Player ${this.state.game.currentTurn} lost, switching turns`);
+      this.state.game.currentTurn = this.state.game.currentTurn === 1 ? 2 : 1;
+    } else {
+      console.log(`Player ${this.state.game.currentTurn} continues (won or tied)`);
+    }
+
     this.state.game.selectedSelf = -1;
     this.state.game.selectedOpponent = -1;
     this.state.game.phase = "choose_self";
@@ -669,6 +702,21 @@ export class MyRoom extends Room<MyRoomState> {
     const players = Array.from(this.state.players.values());
     const p1 = players.find((p) => p.playerId === 1)!;
     const p2 = players.find((p) => p.playerId === 2)!;
+
+    // Notificar cambio de turno o continuación
+    const message = this.state.game.battleWinner === this.state.game.currentTurn 
+      ? `Player ${this.state.game.currentTurn}: You won! Continue choosing your card`
+      : this.state.game.battleWinner === 0
+      ? `Player ${this.state.game.currentTurn}: It's a tie! Continue choosing your card`
+      : `Player ${this.state.game.currentTurn}: Your turn to choose a card`;
+
+    this.broadcast("turn_changed", {
+      currentPlayer: this.state.game.currentTurn,
+      message,
+      continued: this.state.game.battleWinner === this.state.game.currentTurn || this.state.game.battleWinner === 0,
+      p1Credits: p1.credits,
+      p2Credits: p2.credits
+    });
 
     const p1Used =
       p1.usedCards.filter((u) => u).length +
@@ -682,7 +730,10 @@ export class MyRoom extends Room<MyRoomState> {
     } else {
       this.broadcast("next_turn", {
         currentTurn: this.state.game.currentTurn,
-        message: `Player ${this.state.game.currentTurn}: Choose your card`,
+        message,
+        continued: this.state.game.battleWinner === this.state.game.currentTurn || this.state.game.battleWinner === 0,
+        p1Credits: p1.credits,
+        p2Credits: p2.credits
       });
     }
   }
