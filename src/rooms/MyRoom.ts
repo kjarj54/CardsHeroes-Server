@@ -7,13 +7,61 @@ export class MyRoom extends Room<MyRoomState> {
   private betTimer?: NodeJS.Timeout;
   private betTimerInterval?: NodeJS.Timeout;
   private drManhattanTimer?: NodeJS.Timeout;
+  private readonly CHOICE_TIME = 7000; // ms (opcional)
+  private choiceTimer?: NodeJS.Timeout;
+  private bestOp(current: number, diff: number): "+" | "-" {
+    const addR = current + diff;
+    const subR = current - diff;
+    return Math.abs(addR - this.TARGET_SCORE) <=
+      Math.abs(subR - this.TARGET_SCORE)
+      ? "+"
+      : "-";
+  }
 
   // Constantes
   private readonly TARGET_SCORE = 34;
   private readonly DR_MANHATTAN_ID = 67;
-  private readonly JOKER_ID = 0;            // 👈 Joker = 0, igual que en el cliente
-  private readonly BET_TIME = 15;           // seg
+  private readonly JOKER_ID = 0; // 👈 Joker = 0, igual que en el cliente
+  private readonly BET_TIME = 15; // seg
   private readonly DR_MANHATTAN_DURATION = 5;
+
+  private startChoicePhase(winner: number, diff: number) {
+    this.state.game.phase = "battle_choice";
+    this.broadcast("battle_choice", {
+      winner,
+      diff,
+      message: `Player ${winner}: Choose to add (+) or subtract (-) ${diff} points`,
+    });
+
+    // Timeout opcional: auto-elige la mejor opción si no hay respuesta
+    if (this.choiceTimer) clearTimeout(this.choiceTimer);
+    this.choiceTimer = setTimeout(() => {
+      const p = this.getPlayer(winner);
+      if (!p || this.state.game.phase !== "battle_choice") return;
+
+      const op = this.bestOp(p.score, diff);
+      p.score = op === "+" ? p.score + diff : p.score - diff;
+
+      this.broadcast("score_updated", {
+        playerId: p.playerId,
+        newScore: p.score,
+        operation: op,
+        diff,
+        enforced: true, // para HUD si quieres indicar que se aplicó por timeout
+      });
+
+      // Continuar flujo
+      if (this.state.game.afterStarter) this.finishStarterBattle();
+      else this.finishBattle();
+    }, this.CHOICE_TIME);
+  }
+
+  private clearChoiceTimer() {
+    if (this.choiceTimer) {
+      clearTimeout(this.choiceTimer);
+      this.choiceTimer = undefined;
+    }
+  }
 
   // -------- Ciclo de vida --------
   onCreate(options: any) {
@@ -36,7 +84,7 @@ export class MyRoom extends Room<MyRoomState> {
     player.connected = true;
 
     // Asigna 1 o 2 de forma estable
-    const used = Array.from(this.state.players.values()).map(p => p.playerId);
+    const used = Array.from(this.state.players.values()).map((p) => p.playerId);
     player.playerId = used.includes(1) ? 2 : 1;
 
     this.state.players.set(client.sessionId, player);
@@ -79,12 +127,15 @@ export class MyRoom extends Room<MyRoomState> {
       this.handleBet(client, m.amount);
     });
 
-    this.onMessage("bet_submit", (client, m: { player: number; amount: number }) => {
-      const player = this.state.players.get(client.sessionId);
-      if (player && player.playerId === m.player) {
-        this.handleBet(client, m.amount);
+    this.onMessage(
+      "bet_submit",
+      (client, m: { player: number; amount: number }) => {
+        const player = this.state.players.get(client.sessionId);
+        if (player && player.playerId === m.player) {
+          this.handleBet(client, m.amount);
+        }
       }
-    });
+    );
 
     this.onMessage("confirm_bet", (client) => {
       this.handleConfirmBet(client);
@@ -98,9 +149,12 @@ export class MyRoom extends Room<MyRoomState> {
     });
 
     // Selección de carta
-    this.onMessage("select_card", (client, m: { cardIndex: number; isOpponent?: boolean }) => {
-      this.handleCardSelection(client, m.cardIndex, m.isOpponent);
-    });
+    this.onMessage(
+      "select_card",
+      (client, m: { cardIndex: number; isOpponent?: boolean }) => {
+        this.handleCardSelection(client, m.cardIndex, m.isOpponent);
+      }
+    );
 
     // Elección de operación tras ganar
     this.onMessage("battle_choice", (client, m: { operation: "+" | "-" }) => {
@@ -120,13 +174,24 @@ export class MyRoom extends Room<MyRoomState> {
 
   // -------- Utilidades --------
   private clearTimers() {
-    if (this.betTimer) { clearTimeout(this.betTimer); this.betTimer = undefined; }
-    if (this.betTimerInterval) { clearInterval(this.betTimerInterval); this.betTimerInterval = undefined; }
-    if (this.drManhattanTimer) { clearTimeout(this.drManhattanTimer); this.drManhattanTimer = undefined; }
+    if (this.betTimer) {
+      clearTimeout(this.betTimer);
+      this.betTimer = undefined;
+    }
+    if (this.betTimerInterval) {
+      clearInterval(this.betTimerInterval);
+      this.betTimerInterval = undefined;
+    }
+    if (this.drManhattanTimer) {
+      clearTimeout(this.drManhattanTimer);
+      this.drManhattanTimer = undefined;
+    }
   }
 
   private getPlayer(id: number): Player | undefined {
-    return Array.from(this.state.players.values()).find(p => p.playerId === id);
+    return Array.from(this.state.players.values()).find(
+      (p) => p.playerId === id
+    );
   }
 
   // -------- Flujo del juego --------
@@ -148,13 +213,15 @@ export class MyRoom extends Room<MyRoomState> {
       const j = Math.floor(Math.random() * (i + 1));
       [cards[i], cards[j]] = [cards[j], cards[i]];
     }
-    cards.forEach(c => this.state.game.deck.push(c));
+    cards.forEach((c) => this.state.game.deck.push(c));
 
     // Joker aleatorio (1..68) como valor de poder cuando id==0
     this.state.game.jokerValue = Math.floor(Math.random() * 68) + 1;
     this.state.game.deckPos = 0;
 
-    console.log(`🃏 Deck initialized, Joker value: ${this.state.game.jokerValue}`);
+    console.log(
+      `🃏 Deck initialized, Joker value: ${this.state.game.jokerValue}`
+    );
   }
 
   private startNewRound() {
@@ -167,8 +234,8 @@ export class MyRoom extends Room<MyRoomState> {
     }
 
     this.resetRoundState();
-    this.dealHands();           // 👉 reparte y manda "your_hand" a cada cliente
-    this.startBettingPhase();   // 👉 arranca apuestas
+    this.dealHands(); // 👉 reparte y manda "your_hand" a cada cliente
+    this.startBettingPhase(); // 👉 arranca apuestas
   }
 
   private resetRoundState() {
@@ -204,7 +271,10 @@ export class MyRoom extends Room<MyRoomState> {
     const startPos = this.state.game.deckPos;
     const p1 = this.getPlayer(1);
     const p2 = this.getPlayer(2);
-    if (!p1 || !p2) { console.warn("❌ No están ambos jugadores al repartir"); return; }
+    if (!p1 || !p2) {
+      console.warn("❌ No están ambos jugadores al repartir");
+      return;
+    }
 
     console.log(`🎴 Dealing hands from position ${startPos}`);
     for (let i = 0; i < 10; i++) {
@@ -231,7 +301,12 @@ export class MyRoom extends Room<MyRoomState> {
     const p1 = this.getPlayer(1);
     const p2 = this.getPlayer(2);
     console.log("💰 Betting phase started (server)!");
-    console.log("P1:", p1 ? p1.credits : "NO P1", " | P2:", p2 ? p2.credits : "NO P2");
+    console.log(
+      "P1:",
+      p1 ? p1.credits : "NO P1",
+      " | P2:",
+      p2 ? p2.credits : "NO P2"
+    );
 
     this.broadcast("betting_started", {
       timeLimit: this.BET_TIME,
@@ -240,7 +315,10 @@ export class MyRoom extends Room<MyRoomState> {
       p2Credits: p2?.credits ?? 0,
     });
 
-    this.betTimer = setTimeout(() => this.finalizeBetting(), this.BET_TIME * 1000);
+    this.betTimer = setTimeout(
+      () => this.finalizeBetting(),
+      this.BET_TIME * 1000
+    );
 
     this.betTimerInterval = setInterval(() => {
       this.state.game.betTimeLeft--;
@@ -261,7 +339,10 @@ export class MyRoom extends Room<MyRoomState> {
     player.bet = clamped;
     console.log(`💰 Player ${player.playerId} bet ${clamped}`);
 
-    this.broadcast("bet_update", { playerId: player.playerId, amount: clamped });
+    this.broadcast("bet_update", {
+      playerId: player.playerId,
+      amount: clamped,
+    });
   }
 
   private handleConfirmBet(client: Client) {
@@ -278,10 +359,12 @@ export class MyRoom extends Room<MyRoomState> {
     this.broadcast("bet_confirmed", {
       playerId: player.playerId,
       amount: player.bet,
-      newCredits: player.credits,      // 👈 tu cliente espera 'newCredits'
+      newCredits: player.credits, // 👈 tu cliente espera 'newCredits'
     });
 
-    const allConfirmed = Array.from(this.state.players.values()).every(p => p.betConfirmed);
+    const allConfirmed = Array.from(this.state.players.values()).every(
+      (p) => p.betConfirmed
+    );
     if (allConfirmed) {
       console.log("🎯 Both players confirmed - finalizing betting immediately");
       this.finalizeBetting();
@@ -289,8 +372,14 @@ export class MyRoom extends Room<MyRoomState> {
   }
 
   private finalizeBetting() {
-    if (this.betTimer) { clearTimeout(this.betTimer); this.betTimer = undefined; }
-    if (this.betTimerInterval) { clearInterval(this.betTimerInterval); this.betTimerInterval = undefined; }
+    if (this.betTimer) {
+      clearTimeout(this.betTimer);
+      this.betTimer = undefined;
+    }
+    if (this.betTimerInterval) {
+      clearInterval(this.betTimerInterval);
+      this.betTimerInterval = undefined;
+    }
 
     // Auto-apuesta por defecto si alguien no confirmó
     let autoApplied = false;
@@ -303,7 +392,9 @@ export class MyRoom extends Room<MyRoomState> {
         this.state.game.pot += defaultBet;
         autoApplied = true;
 
-        console.log(`⏰ Auto-applied bet for Player ${player.playerId}: ${defaultBet}`);
+        console.log(
+          `⏰ Auto-applied bet for Player ${player.playerId}: ${defaultBet}`
+        );
         this.broadcast("bet_auto_applied", {
           playerId: player.playerId,
           amount: defaultBet,
@@ -312,8 +403,15 @@ export class MyRoom extends Room<MyRoomState> {
       }
     });
 
-    console.log(`💼 Betting finished, pot: ${this.state.game.pot}${autoApplied ? " (some auto-applied)" : ""}`);
-    this.broadcast("betting_finished", { pot: this.state.game.pot, autoApplied });
+    console.log(
+      `💼 Betting finished, pot: ${this.state.game.pot}${
+        autoApplied ? " (some auto-applied)" : ""
+      }`
+    );
+    this.broadcast("betting_finished", {
+      pot: this.state.game.pot,
+      autoApplied,
+    });
 
     this.startStarterPhase();
   }
@@ -327,7 +425,11 @@ export class MyRoom extends Room<MyRoomState> {
     });
   }
 
-  private handleCardSelection(client: Client, cardIndex: number, _isOpponent = false) {
+  private handleCardSelection(
+    client: Client,
+    cardIndex: number,
+    _isOpponent = false
+  ) {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
@@ -339,17 +441,26 @@ export class MyRoom extends Room<MyRoomState> {
       player.blockedCards[cardIndex] = true;
       this.state.game.phase = "starter_p2";
 
-      this.broadcast("card_revealed", { playerId: 1, cardIndex, cardId: player.hand[cardIndex] });
-      this.broadcast("starter_phase", { currentPlayer: 2, message: "Player 2: Select a card to determine who starts" });
-
+      this.broadcast("card_revealed", {
+        playerId: 1,
+        cardIndex,
+        cardId: player.hand[cardIndex],
+      });
+      this.broadcast("starter_phase", {
+        currentPlayer: 2,
+        message: "Player 2: Select a card to determine who starts",
+      });
     } else if (phase === "starter_p2") {
       if (player.playerId !== 2 || this.state.game.starterP2Idx !== -1) return;
       this.state.game.starterP2Idx = cardIndex;
       player.blockedCards[cardIndex] = true;
 
-      this.broadcast("card_revealed", { playerId: 2, cardIndex, cardId: player.hand[cardIndex] });
+      this.broadcast("card_revealed", {
+        playerId: 2,
+        cardIndex,
+        cardId: player.hand[cardIndex],
+      });
       this.resolveStarterBattle();
-
     } else if (phase === "choose_self") {
       if (player.playerId !== this.state.game.currentTurn) return;
       if (player.usedCards[cardIndex] || player.blockedCards[cardIndex]) return;
@@ -357,84 +468,122 @@ export class MyRoom extends Room<MyRoomState> {
       this.state.game.selectedSelf = cardIndex;
       this.state.game.phase = "choose_opponent";
 
-      this.broadcast("card_revealed", { playerId: player.playerId, cardIndex, cardId: player.hand[cardIndex] });
-      this.broadcast("choose_opponent", { message: "Choose opponent's card to battle" });
-
+      this.broadcast("card_revealed", {
+        playerId: player.playerId,
+        cardIndex,
+        cardId: player.hand[cardIndex],
+      });
+      this.broadcast("choose_opponent", {
+        message: "Choose opponent's card to battle",
+      });
     } else if (phase === "choose_opponent") {
       if (player.playerId === this.state.game.currentTurn) return;
       if (player.usedCards[cardIndex] || player.blockedCards[cardIndex]) return;
 
       this.state.game.selectedOpponent = cardIndex;
-      this.broadcast("card_revealed", { playerId: player.playerId, cardIndex, cardId: player.hand[cardIndex] });
+      this.broadcast("card_revealed", {
+        playerId: player.playerId,
+        cardIndex,
+        cardId: player.hand[cardIndex],
+      });
       this.resolveBattle();
     }
   }
 
   private resolveStarterBattle() {
-    const p1 = this.getPlayer(1)!;
-    const p2 = this.getPlayer(2)!;
+    const p1 = this.getPlayer(1);
+    const p2 = this.getPlayer(2);
+    if (!p1 || !p2) {
+      console.warn("❌ resolveStarterBattle: faltan jugadores");
+      return;
+    }
 
-    const p1CardId = p1.hand[this.state.game.starterP1Idx];
-    const p2CardId = p2.hand[this.state.game.starterP2Idx];
+    const i1 = this.state.game.starterP1Idx;
+    const i2 = this.state.game.starterP2Idx;
+    if (i1 < 0 || i2 < 0) {
+      console.warn("❌ resolveStarterBattle: índices de starter no válidos");
+      return;
+    }
+
+    const p1CardId = p1.hand[i1];
+    const p2CardId = p2.hand[i2];
 
     const p1Power = this.getCardPower(p1CardId);
     const p2Power = this.getCardPower(p2CardId);
 
     const diff = Math.abs(p1Power - p2Power);
-    let winner = 0;
+    const winner = p1Power === p2Power ? 0 : p1Power > p2Power ? 1 : 2;
 
-    if (p1Power > p2Power) { winner = 1; this.state.game.currentTurn = 1; }
-    else if (p2Power > p1Power) { winner = 2; this.state.game.currentTurn = 2; }
-    else { winner = 0; this.state.game.currentTurn = 1; }
-
+    // Actualizar estado de la batalla
     this.state.game.battleWinner = winner;
     this.state.game.battleDiff = diff;
     this.state.game.afterStarter = true;
+    this.state.game.currentTurn = winner === 0 ? 1 : winner; // si empatan, arranca P1
 
+    // Notificar resultado del VS inicial
     this.broadcast("starter_battle_result", {
-      p1Card: p1CardId, p2Card: p2CardId,
-      p1Power, p2Power, winner, diff,
+      p1Card: p1CardId,
+      p2Card: p2CardId,
+      p1Power,
+      p2Power,
+      winner,
+      diff,
       nextTurn: this.state.game.currentTurn,
     });
 
+    // Habilidades especiales (Dr. Manhattan, etc.)
     this.handleSpecialAbilities(p1CardId, p2CardId);
 
-    if (winner > 0) {
-      this.state.game.phase = "battle_choice";
-      this.broadcast("battle_choice", {
-        winner, diff,
-        message: `Player ${winner}: Choose to add (+) or subtract (-) ${diff} points`,
-      });
+    // Si hay ganador, pedir elección +/-
+    if (winner > 0 && diff > 0) {
+      this.startChoicePhase(winner, diff);
     } else {
+      // Empate (o diff=0): pasar directamente a la fase siguiente
       this.finishStarterBattle();
     }
   }
 
   private resolveBattle() {
     const players = Array.from(this.state.players.values());
-    const currentPlayer = players.find(p => p.playerId === this.state.game.currentTurn)!;
-    const opponentPlayer = players.find(p => p.playerId !== this.state.game.currentTurn)!;
+    const currentPlayer = players.find(
+      (p) => p.playerId === this.state.game.currentTurn
+    )!;
+    const opponentPlayer = players.find(
+      (p) => p.playerId !== this.state.game.currentTurn
+    )!;
 
     const selfCardId = currentPlayer.hand[this.state.game.selectedSelf];
-    const oppCardId  = opponentPlayer.hand[this.state.game.selectedOpponent];
+    const oppCardId = opponentPlayer.hand[this.state.game.selectedOpponent];
 
     const selfPower = this.getCardPower(selfCardId);
-    const oppPower  = this.getCardPower(oppCardId);
+    const oppPower = this.getCardPower(oppCardId);
 
     const diff = Math.abs(selfPower - oppPower);
-    const win  = selfPower > oppPower;
-    const tie  = selfPower === oppPower;
+    const win = selfPower > oppPower;
+    const tie = selfPower === oppPower;
 
     currentPlayer.usedCards[this.state.game.selectedSelf] = true;
     opponentPlayer.usedCards[this.state.game.selectedOpponent] = true;
 
-    this.state.game.battleWinner = win ? this.state.game.currentTurn : (tie ? 0 : (this.state.game.currentTurn === 1 ? 2 : 1));
+    this.state.game.battleWinner = win
+      ? this.state.game.currentTurn
+      : tie
+      ? 0
+      : this.state.game.currentTurn === 1
+      ? 2
+      : 1;
     this.state.game.battleDiff = diff;
 
     this.broadcast("battle_result", {
       currentPlayer: this.state.game.currentTurn,
-      selfCard: selfCardId, oppCard: oppCardId,
-      selfPower, oppPower, winner: this.state.game.battleWinner, diff, win, tie,
+      selfCard: selfCardId,
+      oppCard: oppCardId,
+      selfPower,
+      oppPower,
+      winner: this.state.game.battleWinner,
+      diff,
+      win,
+      tie,
     });
 
     this.handleSpecialAbilities(selfCardId, oppCardId);
@@ -456,7 +605,9 @@ export class MyRoom extends Room<MyRoomState> {
       this.state.game.drManhattanActive = true;
       this.state.game.drManhattanTimeLeft = this.DR_MANHATTAN_DURATION;
 
-      this.broadcast("dr_manhattan_activated", { duration: this.DR_MANHATTAN_DURATION });
+      this.broadcast("dr_manhattan_activated", {
+        duration: this.DR_MANHATTAN_DURATION,
+      });
 
       this.drManhattanTimer = setTimeout(() => {
         this.state.game.drManhattanActive = false;
@@ -468,19 +619,30 @@ export class MyRoom extends Room<MyRoomState> {
 
   private handleBattleChoice(client: Client, operation: "+" | "-") {
     if (this.state.game.phase !== "battle_choice") return;
+
     const player = this.state.players.get(client.sessionId);
-    if (!player || player.playerId !== this.state.game.battleWinner) return;
+    if (!player) return;
+
+    // Solo el ganador puede elegir
+    if (player.playerId !== this.state.game.battleWinner) return;
+
+    this.clearChoiceTimer();
 
     const diff = this.state.game.battleDiff;
-    this.state.game.battleOp = operation;
 
-    if (operation === "+") {
-      player.score = this.bestNewScore(player.score, diff, "+");
-    } else {
-      player.score = this.bestNewScore(player.score, diff, "-");
-    }
+    // Si quieres forzar SIEMPRE la mejor opción, usa:
+    // const op = this.bestOp(player.score, diff);
+    // Si quieres respetar la elección del jugador:
+    const op = operation;
 
-    this.broadcast("score_updated", { playerId: player.playerId, newScore: player.score, operation, diff });
+    player.score = op === "+" ? player.score + diff : player.score - diff;
+
+    this.broadcast("score_updated", {
+      playerId: player.playerId,
+      newScore: player.score,
+      operation: op,
+      diff,
+    });
 
     if (this.state.game.afterStarter) this.finishStarterBattle();
     else this.finishBattle();
@@ -505,11 +667,15 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.game.phase = "choose_self";
 
     const players = Array.from(this.state.players.values());
-    const p1 = players.find(p => p.playerId === 1)!;
-    const p2 = players.find(p => p.playerId === 2)!;
+    const p1 = players.find((p) => p.playerId === 1)!;
+    const p2 = players.find((p) => p.playerId === 2)!;
 
-    const p1Used = p1.usedCards.filter(u => u).length + (this.state.game.starterP1Idx !== -1 ? 1 : 0);
-    const p2Used = p2.usedCards.filter(u => u).length + (this.state.game.starterP2Idx !== -1 ? 1 : 0);
+    const p1Used =
+      p1.usedCards.filter((u) => u).length +
+      (this.state.game.starterP1Idx !== -1 ? 1 : 0);
+    const p2Used =
+      p2.usedCards.filter((u) => u).length +
+      (this.state.game.starterP2Idx !== -1 ? 1 : 0);
 
     if (p1Used >= 10 && p2Used >= 10) {
       this.finishRound();
@@ -525,16 +691,20 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.game.phase = "round_finished";
 
     const players = Array.from(this.state.players.values());
-    const p1 = players.find(p => p.playerId === 1)!;
-    const p2 = players.find(p => p.playerId === 2)!;
+    const p1 = players.find((p) => p.playerId === 1)!;
+    const p2 = players.find((p) => p.playerId === 2)!;
 
     const p1Distance = Math.abs(p1.score - this.TARGET_SCORE);
     const p2Distance = Math.abs(p2.score - this.TARGET_SCORE);
 
     let roundWinner = 0;
-    if (p1Distance < p2Distance) { roundWinner = 1; p1.credits += this.state.game.pot; }
-    else if (p2Distance < p1Distance) { roundWinner = 2; p2.credits += this.state.game.pot; }
-    else {
+    if (p1Distance < p2Distance) {
+      roundWinner = 1;
+      p1.credits += this.state.game.pot;
+    } else if (p2Distance < p1Distance) {
+      roundWinner = 2;
+      p2.credits += this.state.game.pot;
+    } else {
       const half = Math.floor(this.state.game.pot / 2);
       p1.credits += half;
       p2.credits += this.state.game.pot - half;
@@ -542,13 +712,16 @@ export class MyRoom extends Room<MyRoomState> {
 
     this.broadcast("round_finished", {
       winner: roundWinner,
-      p1Score: p1.score, p2Score: p2.score,
-      p1Credits: p1.credits, p2Credits: p2.credits,
+      p1Score: p1.score,
+      p2Score: p2.score,
+      p1Credits: p1.credits,
+      p2Credits: p2.credits,
       pot: this.state.game.pot,
     });
 
     if (p1.credits <= 0 || p2.credits <= 0) this.endGame("busted");
-    else if (p1.credits >= 1000 || p2.credits >= 1000) this.endGame("real_winner");
+    else if (p1.credits >= 1000 || p2.credits >= 1000)
+      this.endGame("real_winner");
     else {
       setTimeout(() => {
         this.state.game.round++;
@@ -562,8 +735,8 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.game.phase = "game_over";
 
     const players = Array.from(this.state.players.values());
-    const p1 = players.find(p => p.playerId === 1)!;
-    const p2 = players.find(p => p.playerId === 2)!;
+    const p1 = players.find((p) => p.playerId === 1)!;
+    const p2 = players.find((p) => p.playerId === 2)!;
 
     let winner = 0;
     if (reason === "busted") {
@@ -573,13 +746,16 @@ export class MyRoom extends Room<MyRoomState> {
     } else {
       const p1Dist = Math.abs(p1.score - this.TARGET_SCORE);
       const p2Dist = Math.abs(p2.score - this.TARGET_SCORE);
-      winner = p1Dist < p2Dist ? 1 : (p2Dist < p1Dist ? 2 : 0);
+      winner = p1Dist < p2Dist ? 1 : p2Dist < p1Dist ? 2 : 0;
     }
 
     this.broadcast("game_over", {
-      winner, reason,
-      p1Score: p1.score, p2Score: p2.score,
-      p1Credits: p1.credits, p2Credits: p2.credits,
+      winner,
+      reason,
+      p1Score: p1.score,
+      p2Score: p2.score,
+      p1Credits: p1.credits,
+      p2Credits: p2.credits,
     });
 
     console.log(`🏁 Game ended - Winner: Player ${winner}, Reason: ${reason}`);
@@ -589,7 +765,7 @@ export class MyRoom extends Room<MyRoomState> {
     const p = this.state.players.get(client.sessionId);
     if (!p) return;
     p.ready = true;
-    const all = Array.from(this.state.players.values()).every(pp => pp.ready);
+    const all = Array.from(this.state.players.values()).every((pp) => pp.ready);
     if (all) {
       this.state.game.round++;
       this.startNewRound();
@@ -623,7 +799,11 @@ export class MyRoom extends Room<MyRoomState> {
     return cardId; // el resto valen su id (cliente usa así)
   }
 
-  private bestNewScore(current: number, diff: number, preferred?: "+" | "-"): number {
+  private bestNewScore(
+    current: number,
+    diff: number,
+    preferred?: "+" | "-"
+  ): number {
     const target = this.TARGET_SCORE;
     const addR = current + diff;
     const subR = current - diff;
