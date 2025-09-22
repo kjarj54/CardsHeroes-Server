@@ -24,7 +24,7 @@ export class MyRoom extends Room<MyRoomState> {
   private readonly JOKER_ID = 0; // 👈 Joker = 0, igual que en el cliente
   private readonly BET_TIME = 15; // seg
   private readonly DR_MANHATTAN_DURATION = 5;
-  private debugForceManhattanOnce = false; // ponlo en false cuando termines de probar
+  private debugForceManhattanOnce = true; // ponlo en false cuando termines de probar
   private debugForceManhattanPlayer: 1 | 2 = 2; // a quién se la forzas (1 o 2)
   private debugForceManhattanSlot = 0; // índice 0..9 en su mano
 
@@ -49,24 +49,34 @@ export class MyRoom extends Room<MyRoomState> {
     return true;
   }
 
-  private triggerDrManhattan(targetPlayer: number) {
-    // (opcional) flags de estado
-    this.state.game.drManhattanActive = true;
-    this.state.game.drManhattanTimeLeft = this.DR_MANHATTAN_DURATION;
+  // dentro de MyRoom
+  private triggerDrManhattan(ownerId: 1 | 2) {
+    const targetId = ownerId === 1 ? 2 : 1;
 
-    // Enviamos solo quién debe ver (targetPlayer) y duración
-    this.broadcast("dr_manhattan_activated", {
-      targetPlayer,
-      duration: this.DR_MANHATTAN_DURATION,
+    const ownerClient = this.clients.find(
+      (c) => this.state.players.get(c.sessionId)?.playerId === ownerId
+    );
+    const targetClient = this.clients.find(
+      (c) => this.state.players.get(c.sessionId)?.playerId === targetId
+    );
+
+    const opp = this.getPlayer(targetId);
+    if (!ownerClient || !opp) return;
+
+    ownerClient.send("dr_manhattan_activated", {
+      viewer: ownerId,
+      targetPlayer: targetId,
+      opponentHand: Array.from(opp.hand),
+      oppUsed: Array.from(opp.usedCards),
+      oppBlocked: Array.from(opp.blockedCards),
+      duration: this.DR_MANHATTAN_DURATION, // ej. 5
     });
 
-    setTimeout(() => {
-      this.state.game.drManhattanActive = false;
-      this.state.game.drManhattanTimeLeft = 0;
-
-      // Por si quieres que el cliente haga algo al terminar (normalmente no hace falta)
-      this.broadcast("dr_manhattan_deactivated", { targetPlayer });
-    }, this.DR_MANHATTAN_DURATION * 1000);
+    if (targetClient) {
+      targetClient.send("dr_manhattan_notice", {
+        duration: this.DR_MANHATTAN_DURATION,
+      });
+    }
   }
 
   private startChoicePhase(winner: number, diff: number) {
@@ -594,12 +604,9 @@ export class MyRoom extends Room<MyRoomState> {
     const p1CardId = p1.hand[i1];
     const p2CardId = p2.hand[i2];
 
-    // justo después de calcular p1CardId / p2CardId
-    if (p1CardId === this.DR_MANHATTAN_ID) {
-      this.triggerDrManhattan(1);
-    } else if (p2CardId === this.DR_MANHATTAN_ID) {
-      this.triggerDrManhattan(2);
-    }
+    // ✅ AHORA (gatilla para el dueño que la jugó)
+    if (p1CardId === this.DR_MANHATTAN_ID) this.triggerDrManhattan(1);
+    if (p2CardId === this.DR_MANHATTAN_ID) this.triggerDrManhattan(2);
 
     const p1Power = this.getCardPower(p1CardId);
     const p2Power = this.getCardPower(p2CardId);
@@ -630,7 +637,6 @@ export class MyRoom extends Room<MyRoomState> {
     });
 
     // Habilidades especiales (Dr. Manhattan, etc.)
-    this.handleSpecialAbilities(p1CardId, p2CardId);
 
     // Si hay ganador, pedir elección +/-
     if (winner > 0 && diff > 0) {
@@ -690,11 +696,9 @@ export class MyRoom extends Room<MyRoomState> {
 
     const selfCardId = currentPlayer.hand[this.state.game.selectedSelf];
     const oppCardId = opponentPlayer.hand[this.state.game.selectedOpponent];
-    const cur = this.state.game.currentTurn;
+
     if (selfCardId === this.DR_MANHATTAN_ID) {
-      this.triggerDrManhattan(cur); // el que jugó su carta
-    } else if (oppCardId === this.DR_MANHATTAN_ID) {
-      this.triggerDrManhattan(cur === 1 ? 2 : 1); // el otro
+      this.triggerDrManhattan(this.state.game.currentTurn as 1 | 2); // el que jugó su carta
     }
 
     const selfPower = this.getCardPower(selfCardId);
@@ -731,8 +735,6 @@ export class MyRoom extends Room<MyRoomState> {
       tie,
     });
 
-    this.handleSpecialAbilities(selfCardId, oppCardId);
-
     if (win) {
       this.state.game.phase = "battle_choice";
       this.broadcast("battle_choice", {
@@ -743,48 +745,6 @@ export class MyRoom extends Room<MyRoomState> {
     } else {
       this.finishBattle();
     }
-  }
-
-  private handleSpecialAbilities(card1Id: number, card2Id: number) {
-    console.log(
-      "🧪 Special check: c1=",
-      card1Id,
-      "c2=",
-      card2Id,
-      "DR=",
-      this.DR_MANHATTAN_ID
-    );
-
-    const triggered =
-      card1Id === this.DR_MANHATTAN_ID || card2Id === this.DR_MANHATTAN_ID;
-
-    if (!triggered) return;
-
-    // jugador que jugó la carta (gana el reveal)
-    const ownerId = this.state.game.currentTurn;
-    const owner = this.getPlayer(ownerId)!;
-    const opp = this.getPlayer(ownerId === 1 ? 2 : 1)!;
-
-    console.log("💥 Dr. Manhattan ACTIVATED by P", ownerId);
-
-    this.state.game.drManhattanActive = true;
-    this.state.game.drManhattanTimeLeft = this.DR_MANHATTAN_DURATION;
-
-    // 👉 Enviamos la mano real del oponente (y estado de usadas/bloqueadas)
-    this.broadcast("dr_manhattan_activated", {
-      duration: this.DR_MANHATTAN_DURATION,
-      targetPlayer: ownerId, // solo este jugador debe verla
-      opponentHand: Array.from(opp.hand), // ints reales
-      oppUsed: Array.from(opp.usedCards), // bools
-      oppBlocked: Array.from(opp.blockedCards), // bools
-    });
-
-    this.drManhattanTimer = setTimeout(() => {
-      this.state.game.drManhattanActive = false;
-      this.state.game.drManhattanTimeLeft = 0;
-      console.log("💤 Dr. Manhattan DEACTIVATED");
-      this.broadcast("dr_manhattan_deactivated", {});
-    }, this.DR_MANHATTAN_DURATION * 1000);
   }
 
   private handleBattleChoice(client: Client, operation: "+" | "-") {
@@ -842,7 +802,7 @@ export class MyRoom extends Room<MyRoomState> {
     // NUEVA LÓGICA: Alternancia automática después de la primera batalla
     // battleCount 1 = primera batalla después del starter: el ganador continúa
     // battleCount > 1 = batallas posteriores: siempre alternar turnos
-    
+
     if (this.state.game.battleCount === 1) {
       // Primera batalla después del starter: el ganador mantiene el turno
       if (
@@ -876,15 +836,17 @@ export class MyRoom extends Room<MyRoomState> {
     const p2 = players.find((p) => p.playerId === 2)!;
 
     // Notificar cambio de turno o continuación
-    const isContinued = this.state.game.battleCount === 1 && 
-                       (this.state.game.battleWinner === this.state.game.currentTurn || 
-                        this.state.game.battleWinner === 0);
-    
-    const message = this.state.game.battleCount === 1
-      ? (isContinued
+    const isContinued =
+      this.state.game.battleCount === 1 &&
+      (this.state.game.battleWinner === this.state.game.currentTurn ||
+        this.state.game.battleWinner === 0);
+
+    const message =
+      this.state.game.battleCount === 1
+        ? isContinued
           ? `Player ${this.state.game.currentTurn}: You won! Continue choosing your card`
-          : `Player ${this.state.game.currentTurn}: Your turn to choose a card`)
-      : `Player ${this.state.game.currentTurn}: Your turn to choose a card (auto-alternating)`;
+          : `Player ${this.state.game.currentTurn}: Your turn to choose a card`
+        : `Player ${this.state.game.currentTurn}: Your turn to choose a card (auto-alternating)`;
 
     this.broadcast("turn_changed", {
       currentPlayer: this.state.game.currentTurn,
@@ -986,8 +948,8 @@ export class MyRoom extends Room<MyRoomState> {
     } else if (reason === "real_winner") {
       winner = p1.credits >= 1000 ? 1 : 2;
     } else if (reason === "deck_empty") {
-      const d1 = Math.abs(p1.score - this.TARGET_SCORE);
-      const d2 = Math.abs(p2.score - this.TARGET_SCORE);
+      const d1 = Math.abs(p1.credits - this.TARGET_SCORE);
+      const d2 = Math.abs(p2.credits - this.TARGET_SCORE);
       winner = d1 < d2 ? 1 : d2 < d1 ? 2 : 0; // 0 = empate
     }
 
