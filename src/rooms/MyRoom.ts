@@ -24,6 +24,50 @@ export class MyRoom extends Room<MyRoomState> {
   private readonly JOKER_ID = 0; // 👈 Joker = 0, igual que en el cliente
   private readonly BET_TIME = 15; // seg
   private readonly DR_MANHATTAN_DURATION = 5;
+  private debugForceManhattanOnce = false; // ponlo en false cuando termines de probar
+  private debugForceManhattanPlayer: 1 | 2 = 2; // a quién se la forzas (1 o 2)
+  private debugForceManhattanSlot = 0; // índice 0..9 en su mano
+
+  private forceCardInNextDeal(cardId: number, player: 1 | 2, slot: number) {
+    const startPos = this.state.game.deckPos;
+    const target = player === 1 ? startPos + slot : startPos + 10 + slot;
+
+    // buscar la carta en el mazo (desde el principio; sirve igual)
+    let idx = -1;
+    for (let i = 0; i < this.state.game.deck.length; i++) {
+      if (this.state.game.deck[i] === cardId) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx === -1) return false; // no está en el mazo (raro)
+
+    // swap: llevamos la carta al slot objetivo
+    const tmp = this.state.game.deck[target];
+    this.state.game.deck[target] = this.state.game.deck[idx];
+    this.state.game.deck[idx] = tmp;
+    return true;
+  }
+
+  private triggerDrManhattan(targetPlayer: number) {
+    // (opcional) flags de estado
+    this.state.game.drManhattanActive = true;
+    this.state.game.drManhattanTimeLeft = this.DR_MANHATTAN_DURATION;
+
+    // Enviamos solo quién debe ver (targetPlayer) y duración
+    this.broadcast("dr_manhattan_activated", {
+      targetPlayer,
+      duration: this.DR_MANHATTAN_DURATION,
+    });
+
+    setTimeout(() => {
+      this.state.game.drManhattanActive = false;
+      this.state.game.drManhattanTimeLeft = 0;
+
+      // Por si quieres que el cliente haga algo al terminar (normalmente no hace falta)
+      this.broadcast("dr_manhattan_deactivated", { targetPlayer });
+    }, this.DR_MANHATTAN_DURATION * 1000);
+  }
 
   private startChoicePhase(winner: number, diff: number) {
     this.state.game.phase = "battle_choice";
@@ -249,14 +293,17 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.game.battleDiff = 0;
     this.state.game.battleOp = "";
     this.state.game.afterStarter = false;
-    this.state.game.drManhattanActive = false;
-    this.state.game.drManhattanTimeLeft = 0;
-    this.state.game.pot = 0;
 
     this.state.players.forEach((p) => {
+      // ✅ score por RONDA
+      p.score = 0;
+
+      // apuestas (por ronda)
       p.bet = 0;
       p.betConfirmed = false;
       p.ready = false;
+
+      // mano/flags
       p.hand.clear();
       p.usedCards.clear();
       p.blockedCards.clear();
@@ -276,17 +323,27 @@ export class MyRoom extends Room<MyRoomState> {
       return;
     }
 
+    // 👇 SOLO PARA TEST: fuerza Dr. Manhattan una vez
+    if (this.debugForceManhattanOnce) {
+      const ok = this.forceCardInNextDeal(
+        this.DR_MANHATTAN_ID,
+        this.debugForceManhattanPlayer, // 1 o 2
+        this.debugForceManhattanSlot // 0..9
+      );
+      console.log("🔧 Force Manhattan:", ok ? "OK" : "NO ENCONTRADA");
+      this.debugForceManhattanOnce = false; // quítalo si quieres forzar siempre
+    }
+
     console.log(`🎴 Dealing hands from position ${startPos}`);
     for (let i = 0; i < 10; i++) {
       const c1 = this.state.game.deck[startPos + i];
       const c2 = this.state.game.deck[startPos + 10 + i];
       p1.hand.push(c1);
       p2.hand.push(c2);
-      console.log(`🃏 Card ${i}: P1 gets ${c1}, P2 gets ${c2}`);
     }
     this.state.game.deckPos += 20;
 
-    // Enviar mano PRIVADA a cada cliente
+    // mano PRIVADA para cada cliente
     this.clients.forEach((client) => {
       const pl = this.state.players.get(client.sessionId);
       if (pl) client.send("your_hand", { hand: Array.from(pl.hand) });
@@ -313,6 +370,8 @@ export class MyRoom extends Room<MyRoomState> {
       round: this.state.game.round,
       p1Credits: p1?.credits ?? 0,
       p2Credits: p2?.credits ?? 0,
+      p1Score: 0,
+      p2Score: 0,
     });
 
     this.betTimer = setTimeout(
@@ -350,28 +409,31 @@ export class MyRoom extends Room<MyRoomState> {
     const player = this.state.players.get(client.sessionId);
     if (!player || player.betConfirmed) return;
 
-    player.credits -= player.bet;
+    player.credits -= player.bet; // retención
     player.betConfirmed = true;
-    this.state.game.pot += player.bet;
-
-    console.log(`✅ Player ${player.playerId} confirmed bet of ${player.bet}`);
 
     this.broadcast("bet_confirmed", {
       playerId: player.playerId,
       amount: player.bet,
-      newCredits: player.credits, // 👈 tu cliente espera 'newCredits'
+      newCredits: player.credits,
     });
 
     const allConfirmed = Array.from(this.state.players.values()).every(
       (p) => p.betConfirmed
     );
-    if (allConfirmed) {
-      console.log("🎯 Both players confirmed - finalizing betting immediately");
-      this.finalizeBetting();
-    }
+    if (allConfirmed) this.finalizeBetting(); // NO resets de bet aquí
+  }
+  private broadcastBetTotals() {
+    const p1 = this.getPlayer(1);
+    const p2 = this.getPlayer(2);
+    this.broadcast("bet_totals", {
+      p1Bet: p1?.bet ?? 0,
+      p2Bet: p2?.bet ?? 0,
+    });
   }
 
   private finalizeBetting() {
+    // 1) Apaga timers
     if (this.betTimer) {
       clearTimeout(this.betTimer);
       this.betTimer = undefined;
@@ -381,38 +443,46 @@ export class MyRoom extends Room<MyRoomState> {
       this.betTimerInterval = undefined;
     }
 
-    // Auto-apuesta por defecto si alguien no confirmó
+    // 2) Auto-aplicar apuesta mínima si alguien no confirmó (opcional)
     let autoApplied = false;
-    this.state.players.forEach((player) => {
-      if (!player.betConfirmed) {
-        const defaultBet = Math.min(5, player.credits);
-        player.bet = defaultBet;
-        player.credits -= defaultBet;
-        player.betConfirmed = true;
-        this.state.game.pot += defaultBet;
-        autoApplied = true;
+    this.state.players.forEach((p) => {
+      if (!p.betConfirmed) {
+        const defaultBet = Math.min(5, Math.max(0, p.credits)); // ó 0 si no quieres auto-bet
+        if (defaultBet > 0) {
+          p.bet = defaultBet;
+          p.credits -= defaultBet; // retención
+          autoApplied = true;
+        } else {
+          p.bet = 0;
+        }
+        p.betConfirmed = true;
 
-        console.log(
-          `⏰ Auto-applied bet for Player ${player.playerId}: ${defaultBet}`
-        );
+        // Notificar solo si hubo algo que aplicar
         this.broadcast("bet_auto_applied", {
-          playerId: player.playerId,
-          amount: defaultBet,
-          newCredits: player.credits,
+          playerId: p.playerId,
+          amount: p.bet,
+          newCredits: p.credits,
         });
       }
     });
 
-    console.log(
-      `💼 Betting finished, pot: ${this.state.game.pot}${
-        autoApplied ? " (some auto-applied)" : ""
-      }`
-    );
+    // 3) (Opcional) Publica totales de apuestas actuales
+    this.broadcastBetTotals();
+
+    // 4) Cierra fase de apuestas (NO resetees apuestas aquí)
+    const p1 = this.getPlayer(1);
+    const p2 = this.getPlayer(2);
+    const b1 = p1?.bet ?? 0;
+    const b2 = p2?.bet ?? 0;
+
     this.broadcast("betting_finished", {
-      pot: this.state.game.pot,
+      p1Bet: b1,
+      p2Bet: b2,
+      total: b1 + b2, // solo informativo para UI
       autoApplied,
     });
 
+    // 5) Continúa con la fase de starters
     this.startStarterPhase();
   }
 
@@ -422,12 +492,12 @@ export class MyRoom extends Room<MyRoomState> {
     const players = Array.from(this.state.players.values());
     const p1 = players.find((p) => p.playerId === 1);
     const p2 = players.find((p) => p.playerId === 2);
-    
+
     this.broadcast("starter_phase", {
       currentPlayer: 1,
       message: "Player 1: Select a card to determine who starts",
       p1Credits: p1?.credits || 100,
-      p2Credits: p2?.credits || 100
+      p2Credits: p2?.credits || 100,
     });
   }
 
@@ -485,14 +555,15 @@ export class MyRoom extends Room<MyRoomState> {
     } else if (phase === "choose_opponent") {
       // El jugador actual elige la carta del oponente para batallar
       if (player.playerId !== this.state.game.currentTurn) return;
-      
+
       // Obtener el oponente
       const opponentId = this.state.game.currentTurn === 1 ? 2 : 1;
       const opponent = this.getPlayer(opponentId);
       if (!opponent) return;
-      
+
       // Verificar que la carta del oponente no esté usada o bloqueada
-      if (opponent.usedCards[cardIndex] || opponent.blockedCards[cardIndex]) return;
+      if (opponent.usedCards[cardIndex] || opponent.blockedCards[cardIndex])
+        return;
 
       this.state.game.selectedOpponent = cardIndex;
       this.broadcast("card_revealed", {
@@ -522,6 +593,13 @@ export class MyRoom extends Room<MyRoomState> {
     const p1CardId = p1.hand[i1];
     const p2CardId = p2.hand[i2];
 
+    // justo después de calcular p1CardId / p2CardId
+    if (p1CardId === this.DR_MANHATTAN_ID) {
+      this.triggerDrManhattan(1);
+    } else if (p2CardId === this.DR_MANHATTAN_ID) {
+      this.triggerDrManhattan(2);
+    }
+
     const p1Power = this.getCardPower(p1CardId);
     const p2Power = this.getCardPower(p2CardId);
 
@@ -534,7 +612,9 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.game.afterStarter = true;
     this.state.game.currentTurn = winner === 0 ? 1 : winner; // si empatan, arranca P1
 
-    console.log(`⚔️ Starter battle: P1(${p1CardId}=${p1Power}) vs P2(${p2CardId}=${p2Power}), winner: ${winner}`);
+    console.log(
+      `⚔️ Starter battle: P1(${p1CardId}=${p1Power}) vs P2(${p2CardId}=${p2Power}), winner: ${winner}`
+    );
 
     // Notificar resultado del VS inicial
     this.broadcast("starter_battle_result", {
@@ -558,6 +638,44 @@ export class MyRoom extends Room<MyRoomState> {
       this.finishStarterBattle();
     }
   }
+  // ID que ya usas para Dr. Manhattan
+
+  // Mueve una carta específica a un índice de la mano del jugador (haciendo swap si ya estaba en otro lado)
+  private forceCardInHand(cardId: number, playerId: 1 | 2, handIndex = 0) {
+    const p1 = this.getPlayer(1);
+    const p2 = this.getPlayer(2);
+    const p = this.getPlayer(playerId);
+    if (!p1 || !p2 || !p) return;
+
+    // ¿Ya está en la posición objetivo?
+    if (p.hand[handIndex] === cardId) return;
+
+    // 1) Buscar dentro de ambas manos y swappear si la encontramos
+    for (let i = 0; i < 10; i++) {
+      if (p1.hand[i] === cardId) {
+        const tmp = p.hand[handIndex];
+        p1.hand[i] = tmp;
+        p.hand[handIndex] = cardId;
+        return;
+      }
+      if (p2.hand[i] === cardId) {
+        const tmp = p.hand[handIndex];
+        p2.hand[i] = tmp;
+        p.hand[handIndex] = cardId;
+        return;
+      }
+    }
+
+    // 2) Si no estaba en manos, intentar buscarla en el mazo restante
+    const start = this.state.game.deckPos; // después de repartir, apunta al siguiente bloque
+    const idx = this.state.game.deck.indexOf(cardId, start);
+    if (idx >= 0) {
+      // Cambiar por la carta que tenía el jugador en ese índice
+      const tmp = p.hand[handIndex];
+      this.state.game.deck[idx] = tmp;
+      p.hand[handIndex] = cardId;
+    }
+  }
 
   private resolveBattle() {
     const players = Array.from(this.state.players.values());
@@ -570,6 +688,12 @@ export class MyRoom extends Room<MyRoomState> {
 
     const selfCardId = currentPlayer.hand[this.state.game.selectedSelf];
     const oppCardId = opponentPlayer.hand[this.state.game.selectedOpponent];
+    const cur = this.state.game.currentTurn;
+    if (selfCardId === this.DR_MANHATTAN_ID) {
+      this.triggerDrManhattan(cur); // el que jugó su carta
+    } else if (oppCardId === this.DR_MANHATTAN_ID) {
+      this.triggerDrManhattan(cur === 1 ? 2 : 1); // el otro
+    }
 
     const selfPower = this.getCardPower(selfCardId);
     const oppPower = this.getCardPower(oppCardId);
@@ -617,53 +741,76 @@ export class MyRoom extends Room<MyRoomState> {
   }
 
   private handleSpecialAbilities(card1Id: number, card2Id: number) {
-    if (card1Id === this.DR_MANHATTAN_ID || card2Id === this.DR_MANHATTAN_ID) {
-      this.state.game.drManhattanActive = true;
-      this.state.game.drManhattanTimeLeft = this.DR_MANHATTAN_DURATION;
+    console.log(
+      "🧪 Special check: c1=",
+      card1Id,
+      "c2=",
+      card2Id,
+      "DR=",
+      this.DR_MANHATTAN_ID
+    );
 
-      this.broadcast("dr_manhattan_activated", {
-        duration: this.DR_MANHATTAN_DURATION,
-      });
+    const triggered =
+      card1Id === this.DR_MANHATTAN_ID || card2Id === this.DR_MANHATTAN_ID;
 
-      this.drManhattanTimer = setTimeout(() => {
-        this.state.game.drManhattanActive = false;
-        this.state.game.drManhattanTimeLeft = 0;
-        this.broadcast("dr_manhattan_deactivated");
-      }, this.DR_MANHATTAN_DURATION * 1000);
-    }
+    if (!triggered) return;
+
+    // jugador que jugó la carta (gana el reveal)
+    const ownerId = this.state.game.currentTurn;
+    const owner = this.getPlayer(ownerId)!;
+    const opp = this.getPlayer(ownerId === 1 ? 2 : 1)!;
+
+    console.log("💥 Dr. Manhattan ACTIVATED by P", ownerId);
+
+    this.state.game.drManhattanActive = true;
+    this.state.game.drManhattanTimeLeft = this.DR_MANHATTAN_DURATION;
+
+    // 👉 Enviamos la mano real del oponente (y estado de usadas/bloqueadas)
+    this.broadcast("dr_manhattan_activated", {
+      duration: this.DR_MANHATTAN_DURATION,
+      targetPlayer: ownerId, // solo este jugador debe verla
+      opponentHand: Array.from(opp.hand), // ints reales
+      oppUsed: Array.from(opp.usedCards), // bools
+      oppBlocked: Array.from(opp.blockedCards), // bools
+    });
+
+    this.drManhattanTimer = setTimeout(() => {
+      this.state.game.drManhattanActive = false;
+      this.state.game.drManhattanTimeLeft = 0;
+      console.log("💤 Dr. Manhattan DEACTIVATED");
+      this.broadcast("dr_manhattan_deactivated", {});
+    }, this.DR_MANHATTAN_DURATION * 1000);
   }
 
   private handleBattleChoice(client: Client, operation: "+" | "-") {
     if (this.state.game.phase !== "battle_choice") return;
 
     const player = this.state.players.get(client.sessionId);
-    if (!player) return;
-
-    // Solo el ganador puede elegir
-    if (player.playerId !== this.state.game.battleWinner) return;
-
-    this.clearChoiceTimer();
+    if (!player || player.playerId !== this.state.game.battleWinner) return;
 
     const diff = this.state.game.battleDiff;
+    this.state.game.battleOp = operation;
 
-    // Si quieres forzar SIEMPRE la mejor opción, usa:
-    // const op = this.bestOp(player.score, diff);
-    // Si quieres respetar la elección del jugador:
-    const op = operation;
-
-    player.score = op === "+" ? player.score + diff : player.score - diff;
+    if (operation === "+") {
+      player.score = this.bestNewScore(player.score, diff, "+");
+    } else {
+      player.score = this.bestNewScore(player.score, diff, "-");
+    }
 
     this.broadcast("score_updated", {
       playerId: player.playerId,
       newScore: player.score,
-      operation: op,
+      operation,
       diff,
-      p1Credits: this.getPlayer(1)?.credits || 100,
-      p2Credits: this.getPlayer(2)?.credits || 100
     });
 
-    if (this.state.game.afterStarter) this.finishStarterBattle();
-    else this.finishBattle();
+    // ✅ NO terminar partida aunque llegue a 34 exacto.
+    // Continúa el flujo normal:
+    if (this.state.game.afterStarter) {
+      this.finishStarterBattle();
+    } else {
+      this.finishBattle();
+    }
   }
 
   private finishStarterBattle() {
@@ -676,7 +823,7 @@ export class MyRoom extends Room<MyRoomState> {
       nextTurn: this.state.game.currentTurn,
       message: `Player ${this.state.game.currentTurn}: Choose your card`,
     });
-    
+
     // Enviar inmediatamente la fase de elección
     setTimeout(() => {
       this.broadcast("choose_self", {
@@ -688,11 +835,18 @@ export class MyRoom extends Room<MyRoomState> {
 
   private finishBattle() {
     // Solo cambiar turno si el jugador actual perdió
-    if (this.state.game.battleWinner !== this.state.game.currentTurn && this.state.game.battleWinner !== 0) {
-      console.log(`Player ${this.state.game.currentTurn} lost, switching turns`);
+    if (
+      this.state.game.battleWinner !== this.state.game.currentTurn &&
+      this.state.game.battleWinner !== 0
+    ) {
+      console.log(
+        `Player ${this.state.game.currentTurn} lost, switching turns`
+      );
       this.state.game.currentTurn = this.state.game.currentTurn === 1 ? 2 : 1;
     } else {
-      console.log(`Player ${this.state.game.currentTurn} continues (won or tied)`);
+      console.log(
+        `Player ${this.state.game.currentTurn} continues (won or tied)`
+      );
     }
 
     this.state.game.selectedSelf = -1;
@@ -704,18 +858,21 @@ export class MyRoom extends Room<MyRoomState> {
     const p2 = players.find((p) => p.playerId === 2)!;
 
     // Notificar cambio de turno o continuación
-    const message = this.state.game.battleWinner === this.state.game.currentTurn 
-      ? `Player ${this.state.game.currentTurn}: You won! Continue choosing your card`
-      : this.state.game.battleWinner === 0
-      ? `Player ${this.state.game.currentTurn}: It's a tie! Continue choosing your card`
-      : `Player ${this.state.game.currentTurn}: Your turn to choose a card`;
+    const message =
+      this.state.game.battleWinner === this.state.game.currentTurn
+        ? `Player ${this.state.game.currentTurn}: You won! Continue choosing your card`
+        : this.state.game.battleWinner === 0
+        ? `Player ${this.state.game.currentTurn}: It's a tie! Continue choosing your card`
+        : `Player ${this.state.game.currentTurn}: Your turn to choose a card`;
 
     this.broadcast("turn_changed", {
       currentPlayer: this.state.game.currentTurn,
       message,
-      continued: this.state.game.battleWinner === this.state.game.currentTurn || this.state.game.battleWinner === 0,
+      continued:
+        this.state.game.battleWinner === this.state.game.currentTurn ||
+        this.state.game.battleWinner === 0,
       p1Credits: p1.credits,
-      p2Credits: p2.credits
+      p2Credits: p2.credits,
     });
 
     const p1Used =
@@ -731,9 +888,11 @@ export class MyRoom extends Room<MyRoomState> {
       this.broadcast("next_turn", {
         currentTurn: this.state.game.currentTurn,
         message,
-        continued: this.state.game.battleWinner === this.state.game.currentTurn || this.state.game.battleWinner === 0,
+        continued:
+          this.state.game.battleWinner === this.state.game.currentTurn ||
+          this.state.game.battleWinner === 0,
         p1Credits: p1.credits,
-        p2Credits: p2.credits
+        p2Credits: p2.credits,
       });
     }
   }
@@ -741,63 +900,76 @@ export class MyRoom extends Room<MyRoomState> {
   private finishRound() {
     this.state.game.phase = "round_finished";
 
-    const players = Array.from(this.state.players.values());
-    const p1 = players.find((p) => p.playerId === 1)!;
-    const p2 = players.find((p) => p.playerId === 2)!;
+    const p1 = this.getPlayer(1)!;
+    const p2 = this.getPlayer(2)!;
 
-    const p1Distance = Math.abs(p1.score - this.TARGET_SCORE);
-    const p2Distance = Math.abs(p2.score - this.TARGET_SCORE);
+    // Ganador de la RONDA por cercanía a 34 (score acumulado)
+    const d1 = Math.abs(p1.score - this.TARGET_SCORE);
+    const d2 = Math.abs(p2.score - this.TARGET_SCORE);
 
-    let roundWinner = 0;
-    if (p1Distance < p2Distance) {
-      roundWinner = 1;
-      p1.credits += this.state.game.pot;
-    } else if (p2Distance < p1Distance) {
-      roundWinner = 2;
-      p2.credits += this.state.game.pot;
+    let winner = 0;
+    if (d1 < d2) winner = 1;
+    else if (d2 < d1) winner = 2;
+
+    // 💸 PAGO por ronda (apuesta retenida)
+    if (winner === 1) {
+      p1.credits += 2 * p1.bet; // neto: gana su propio bet
+    } else if (winner === 2) {
+      p2.credits += 2 * p2.bet;
     } else {
-      const half = Math.floor(this.state.game.pot / 2);
-      p1.credits += half;
-      p2.credits += this.state.game.pot - half;
+      // Empate: reembolsar apuestas
+      p1.credits += p1.bet;
+      p2.credits += p2.bet;
     }
 
     this.broadcast("round_finished", {
-      winner: roundWinner,
+      winner,
       p1Score: p1.score,
       p2Score: p2.score,
       p1Credits: p1.credits,
       p2Credits: p2.credits,
-      pot: this.state.game.pot,
     });
 
-    if (p1.credits <= 0 || p2.credits <= 0) this.endGame("busted");
-    else if (p1.credits >= 1000 || p2.credits >= 1000)
-      this.endGame("real_winner");
-    else {
-      setTimeout(() => {
-        this.state.game.round++;
-        this.startNewRound();
-      }, 3000);
+    // ✅ Condiciones de FIN DE PARTIDA
+    if (p1.credits <= 0 || p2.credits <= 0) {
+      this.endGame("busted");
+      return;
     }
+    if (p1.credits >= 1000 || p2.credits >= 1000) {
+      this.endGame("real_winner");
+      return;
+    }
+
+    // ✅ ¿Quedan cartas para una nueva ronda?
+    if (this.state.game.deckPos + 20 > this.state.game.deck.length) {
+      // Sin cartas suficientes: fin por mazo
+      this.endGame("deck_empty");
+      return;
+    }
+
+    // ✅ Si no terminó, seguir con la siguiente ronda
+    setTimeout(() => {
+      this.state.game.round++;
+      this.startNewRound(); // aquí NO resetees score; sí bets/manos/used/blocked
+    }, 3000);
   }
 
-  private endGame(reason: "busted" | "real_winner" | "deck_empty") {
+  private endGame(reason: string) {
     this.state.gameStatus = "finished";
     this.state.game.phase = "game_over";
 
-    const players = Array.from(this.state.players.values());
-    const p1 = players.find((p) => p.playerId === 1)!;
-    const p2 = players.find((p) => p.playerId === 2)!;
+    const p1 = this.getPlayer(1)!;
+    const p2 = this.getPlayer(2)!;
 
     let winner = 0;
     if (reason === "busted") {
       winner = p1.credits > p2.credits ? 1 : 2;
     } else if (reason === "real_winner") {
       winner = p1.credits >= 1000 ? 1 : 2;
-    } else {
-      const p1Dist = Math.abs(p1.score - this.TARGET_SCORE);
-      const p2Dist = Math.abs(p2.score - this.TARGET_SCORE);
-      winner = p1Dist < p2Dist ? 1 : p2Dist < p1Dist ? 2 : 0;
+    } else if (reason === "deck_empty") {
+      const d1 = Math.abs(p1.score - this.TARGET_SCORE);
+      const d2 = Math.abs(p2.score - this.TARGET_SCORE);
+      winner = d1 < d2 ? 1 : d2 < d1 ? 2 : 0; // 0 = empate
     }
 
     this.broadcast("game_over", {
@@ -809,7 +981,11 @@ export class MyRoom extends Room<MyRoomState> {
       p2Credits: p2.credits,
     });
 
-    console.log(`🏁 Game ended - Winner: Player ${winner}, Reason: ${reason}`);
+    console.log(
+      `🏁 Game ended - Winner: ${
+        winner === 0 ? "Tie" : "P" + winner
+      } — Reason: ${reason}`
+    );
   }
 
   private handleReadyNextRound(client: Client) {
