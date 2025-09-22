@@ -48,6 +48,9 @@ export class GameState extends Schema {
   @type("number") drManhattanTimeLeft: number = 0;
 
   @type("boolean") afterStarter: boolean = false;
+  
+  // === Control de turnos ===
+  @type("number") battleCount: number = 0;
 }
 
 export class MyRoomState extends Schema {

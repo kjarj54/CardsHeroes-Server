@@ -293,6 +293,7 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.game.battleDiff = 0;
     this.state.game.battleOp = "";
     this.state.game.afterStarter = false;
+    this.state.game.battleCount = 0; // reiniciar contador de batallas
 
     this.state.players.forEach((p) => {
       // ✅ score por RONDA
@@ -607,6 +608,7 @@ export class MyRoom extends Room<MyRoomState> {
     const winner = p1Power === p2Power ? 0 : p1Power > p2Power ? 1 : 2;
 
     // Actualizar estado de la batalla
+    this.state.game.battleCount++; // incrementar contador de batallas
     this.state.game.battleWinner = winner;
     this.state.game.battleDiff = diff;
     this.state.game.afterStarter = true;
@@ -701,6 +703,9 @@ export class MyRoom extends Room<MyRoomState> {
     const diff = Math.abs(selfPower - oppPower);
     const win = selfPower > oppPower;
     const tie = selfPower === oppPower;
+
+    // Incrementar contador de batallas
+    this.state.game.battleCount++;
 
     currentPlayer.usedCards[this.state.game.selectedSelf] = true;
     opponentPlayer.usedCards[this.state.game.selectedOpponent] = true;
@@ -834,18 +839,31 @@ export class MyRoom extends Room<MyRoomState> {
   }
 
   private finishBattle() {
-    // Solo cambiar turno si el jugador actual perdió
-    if (
-      this.state.game.battleWinner !== this.state.game.currentTurn &&
-      this.state.game.battleWinner !== 0
-    ) {
-      console.log(
-        `Player ${this.state.game.currentTurn} lost, switching turns`
-      );
-      this.state.game.currentTurn = this.state.game.currentTurn === 1 ? 2 : 1;
+    // NUEVA LÓGICA: Alternancia automática después de la primera batalla
+    // battleCount 1 = primera batalla después del starter: el ganador continúa
+    // battleCount > 1 = batallas posteriores: siempre alternar turnos
+    
+    if (this.state.game.battleCount === 1) {
+      // Primera batalla después del starter: el ganador mantiene el turno
+      if (
+        this.state.game.battleWinner !== this.state.game.currentTurn &&
+        this.state.game.battleWinner !== 0
+      ) {
+        console.log(
+          `First battle: Player ${this.state.game.currentTurn} lost, switching turns`
+        );
+        this.state.game.currentTurn = this.state.game.currentTurn === 1 ? 2 : 1;
+      } else {
+        console.log(
+          `First battle: Player ${this.state.game.currentTurn} continues (won or tied)`
+        );
+      }
     } else {
+      // Batallas posteriores: siempre alternar turnos sin importar el resultado
+      const previousTurn = this.state.game.currentTurn;
+      this.state.game.currentTurn = this.state.game.currentTurn === 1 ? 2 : 1;
       console.log(
-        `Player ${this.state.game.currentTurn} continues (won or tied)`
+        `Battle ${this.state.game.battleCount}: Auto-switching from Player ${previousTurn} to Player ${this.state.game.currentTurn}`
       );
     }
 
@@ -858,21 +876,23 @@ export class MyRoom extends Room<MyRoomState> {
     const p2 = players.find((p) => p.playerId === 2)!;
 
     // Notificar cambio de turno o continuación
-    const message =
-      this.state.game.battleWinner === this.state.game.currentTurn
-        ? `Player ${this.state.game.currentTurn}: You won! Continue choosing your card`
-        : this.state.game.battleWinner === 0
-        ? `Player ${this.state.game.currentTurn}: It's a tie! Continue choosing your card`
-        : `Player ${this.state.game.currentTurn}: Your turn to choose a card`;
+    const isContinued = this.state.game.battleCount === 1 && 
+                       (this.state.game.battleWinner === this.state.game.currentTurn || 
+                        this.state.game.battleWinner === 0);
+    
+    const message = this.state.game.battleCount === 1
+      ? (isContinued
+          ? `Player ${this.state.game.currentTurn}: You won! Continue choosing your card`
+          : `Player ${this.state.game.currentTurn}: Your turn to choose a card`)
+      : `Player ${this.state.game.currentTurn}: Your turn to choose a card (auto-alternating)`;
 
     this.broadcast("turn_changed", {
       currentPlayer: this.state.game.currentTurn,
       message,
-      continued:
-        this.state.game.battleWinner === this.state.game.currentTurn ||
-        this.state.game.battleWinner === 0,
+      continued: isContinued,
       p1Credits: p1.credits,
       p2Credits: p2.credits,
+      battleCount: this.state.game.battleCount, // incluir contador de batallas
     });
 
     const p1Used =
@@ -888,11 +908,10 @@ export class MyRoom extends Room<MyRoomState> {
       this.broadcast("next_turn", {
         currentTurn: this.state.game.currentTurn,
         message,
-        continued:
-          this.state.game.battleWinner === this.state.game.currentTurn ||
-          this.state.game.battleWinner === 0,
+        continued: isContinued,
         p1Credits: p1.credits,
         p2Credits: p2.credits,
+        battleCount: this.state.game.battleCount, // incluir contador de batallas
       });
     }
   }
