@@ -273,6 +273,10 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.game.jokerValue = Math.floor(Math.random() * 68) + 1;
     this.state.game.deckPos = 0;
 
+    this.broadcast("joker_value", {
+      value: this.state.game.jokerValue,
+    });
+
     console.log(
       `🃏 Deck initialized, Joker value: ${this.state.game.jokerValue}`
     );
