@@ -24,7 +24,7 @@ export class MyRoom extends Room<MyRoomState> {
   private readonly JOKER_ID = 0; // 👈 Joker = 0, igual que en el cliente
   private readonly BET_TIME = 15; // seg
   private readonly DR_MANHATTAN_DURATION = 5;
-  private debugForceManhattanOnce = true; // ponlo en false cuando termines de probar
+  private debugForceManhattanOnce = false; // ponlo en false cuando termines de probar
   private debugForceManhattanPlayer: 1 | 2 = 2; // a quién se la forzas (1 o 2)
   private debugForceManhattanSlot = 0; // índice 0..9 en su mano
 
@@ -285,15 +285,27 @@ export class MyRoom extends Room<MyRoomState> {
   private startNewRound() {
     console.log(`🔄 Starting round ${this.state.game.round}`);
 
-    // ¿Alcanza el mazo?
-    if (this.state.game.deckPos + 20 > this.state.game.deck.length) {
-      this.endGame("deck_empty");
-      return;
+    // Reset round state
+    this.resetRoundState();
+
+    // 🔁 Crear y barajar un nuevo mazo en CADA ronda
+    const newDeck = Array.from({ length: 68 }, (_, i) => i);
+
+    for (let i = newDeck.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [newDeck[i], newDeck[j]] = [newDeck[j], newDeck[i]];
     }
 
-    this.resetRoundState();
-    this.dealHands(); // 👉 reparte y manda "your_hand" a cada cliente
-    this.startBettingPhase(); // 👉 arranca apuestas
+    // ✅ Limpiar el ArraySchema y rellenarlo
+    this.state.game.deck.clear();
+    newDeck.forEach((card) => this.state.game.deck.push(card));
+    this.state.game.deckPos = 0;
+
+    // Repartir cartas
+    this.dealHands();
+
+    // Iniciar apuestas
+    this.startBettingPhase();
   }
 
   private resetRoundState() {
@@ -333,10 +345,15 @@ export class MyRoom extends Room<MyRoomState> {
     const startPos = this.state.game.deckPos;
     const p1 = this.getPlayer(1);
     const p2 = this.getPlayer(2);
+
     if (!p1 || !p2) {
       console.warn("❌ No están ambos jugadores al repartir");
       return;
     }
+
+    // 🧹 Limpiar manos previas sin romper el ArraySchema
+    p1.hand.length = 0;
+    p2.hand.length = 0;
 
     // 👇 SOLO PARA TEST: fuerza Dr. Manhattan una vez
     if (this.debugForceManhattanOnce) {
@@ -350,18 +367,26 @@ export class MyRoom extends Room<MyRoomState> {
     }
 
     console.log(`🎴 Dealing hands from position ${startPos}`);
+
+    // Reparte 10 cartas a cada jugador
     for (let i = 0; i < 10; i++) {
       const c1 = this.state.game.deck[startPos + i];
       const c2 = this.state.game.deck[startPos + 10 + i];
-      p1.hand.push(c1);
-      p2.hand.push(c2);
+
+      if (c1 !== undefined) p1.hand.push(c1);
+      if (c2 !== undefined) p2.hand.push(c2);
+
+      console.log(`🃏 Card ${i}: P1 gets ${c1}, P2 gets ${c2}`);
     }
+
     this.state.game.deckPos += 20;
 
-    // mano PRIVADA para cada cliente
+    // 👉 Mandar mano PRIVADA a cada cliente
     this.clients.forEach((client) => {
       const pl = this.state.players.get(client.sessionId);
-      if (pl) client.send("your_hand", { hand: Array.from(pl.hand) });
+      if (pl) {
+        client.send("your_hand", { hand: Array.from(pl.hand) });
+      }
     });
   }
 
@@ -888,7 +913,7 @@ export class MyRoom extends Room<MyRoomState> {
     const p1 = this.getPlayer(1)!;
     const p2 = this.getPlayer(2)!;
 
-    // Ganador de la RONDA por cercanía a 34 (score acumulado)
+    // Ganador de la RONDA por cercanía a 34 (puntaje acumulado)
     const d1 = Math.abs(p1.score - this.TARGET_SCORE);
     const d2 = Math.abs(p2.score - this.TARGET_SCORE);
 
@@ -896,26 +921,28 @@ export class MyRoom extends Room<MyRoomState> {
     if (d1 < d2) winner = 1;
     else if (d2 < d1) winner = 2;
 
-    // 💸 PAGO por ronda (apuesta retenida)
+    // 💸 Pago de apuestas de la ronda
     if (winner === 1) {
-      p1.credits += 2 * p1.bet; // neto: gana su propio bet
+      p1.credits += 2 * p1.bet;
     } else if (winner === 2) {
       p2.credits += 2 * p2.bet;
     } else {
-      // Empate: reembolsar apuestas
+      // Empate → devolver apuestas
       p1.credits += p1.bet;
       p2.credits += p2.bet;
     }
 
+    // Notificar a clientes fin de ronda
     this.broadcast("round_finished", {
       winner,
       p1Score: p1.score,
       p2Score: p2.score,
       p1Credits: p1.credits,
       p2Credits: p2.credits,
+      round: this.state.game.round,
     });
 
-    // ✅ Condiciones de FIN DE PARTIDA
+    // ✅ Condiciones de FIN DE PARTIDA por créditos
     if (p1.credits <= 0 || p2.credits <= 0) {
       this.endGame("busted");
       return;
@@ -925,21 +952,28 @@ export class MyRoom extends Room<MyRoomState> {
       return;
     }
 
-    // ✅ ¿Quedan cartas para una nueva ronda?
-    if (this.state.game.deckPos + 20 > this.state.game.deck.length) {
-      // Sin cartas suficientes: fin por mazo
-      this.endGame("deck_empty");
+    // ✅ Condición por número de rondas
+    if (this.state.game.round >= 10) {
+      // Se acabaron las rondas → determinar ganador por cercanía a 34
+      const d1Final = Math.abs(p1.score - this.TARGET_SCORE);
+      const d2Final = Math.abs(p2.score - this.TARGET_SCORE);
+
+      let finalWinner = 0;
+      if (d1Final < d2Final) finalWinner = 1;
+      else if (d2Final < d1Final) finalWinner = 2;
+
+      this.endGame("round_limit", finalWinner);
       return;
     }
 
-    // ✅ Si no terminó, seguir con la siguiente ronda
+    // ✅ Si no terminó la partida → iniciar la siguiente ronda
     setTimeout(() => {
       this.state.game.round++;
-      this.startNewRound(); // aquí NO resetees score; sí bets/manos/used/blocked
+      this.startNewRound(); // Reparte nuevo mazo y reinicia bets/manos/used
     }, 3000);
   }
 
-  private endGame(reason: string) {
+  private endGame(reason: string, forcedWinner?: number) {
     this.state.gameStatus = "finished";
     this.state.game.phase = "game_over";
 
@@ -947,14 +981,20 @@ export class MyRoom extends Room<MyRoomState> {
     const p2 = this.getPlayer(2)!;
 
     let winner = 0;
+
     if (reason === "busted") {
       winner = p1.credits > p2.credits ? 1 : 2;
     } else if (reason === "real_winner") {
       winner = p1.credits >= 1000 ? 1 : 2;
-    } else if (reason === "deck_empty") {
-      const d1 = Math.abs(p1.credits - this.TARGET_SCORE);
-      const d2 = Math.abs(p2.credits - this.TARGET_SCORE);
-      winner = d1 < d2 ? 1 : d2 < d1 ? 2 : 0; // 0 = empate
+    } else if (reason === "round_limit") {
+      if (forcedWinner !== undefined) {
+        winner = forcedWinner; // ya lo calculaste en finishRound()
+      } else {
+        // fallback: calcular aquí por cercanía a 34
+        const d1 = Math.abs(p1.score - this.TARGET_SCORE);
+        const d2 = Math.abs(p2.score - this.TARGET_SCORE);
+        winner = d1 < d2 ? 1 : d2 < d1 ? 2 : 0; // empate si están igual de cerca
+      }
     }
 
     this.broadcast("game_over", {
