@@ -969,6 +969,16 @@ export class MyRoom extends Room<MyRoomState> {
     // ✅ Si no terminó la partida → iniciar la siguiente ronda
     setTimeout(() => {
       this.state.game.round++;
+
+      // 🎲 Nuevo valor para Joker en cada ronda
+      this.state.game.jokerValue = Math.floor(Math.random() * 68) + 1;
+
+      // Avisar a todos los clientes
+      this.broadcast("joker_value", {
+        value: this.state.game.jokerValue,
+        round: this.state.game.round,
+      });
+
       this.startNewRound(); // Reparte nuevo mazo y reinicia bets/manos/used
     }, 3000);
   }
