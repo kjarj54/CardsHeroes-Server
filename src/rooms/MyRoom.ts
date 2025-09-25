@@ -677,43 +677,6 @@ export class MyRoom extends Room<MyRoomState> {
   }
   // ID que ya usas para Dr. Manhattan
 
-  // Mueve una carta específica a un índice de la mano del jugador (haciendo swap si ya estaba en otro lado)
-  private forceCardInHand(cardId: number, playerId: 1 | 2, handIndex = 0) {
-    const p1 = this.getPlayer(1);
-    const p2 = this.getPlayer(2);
-    const p = this.getPlayer(playerId);
-    if (!p1 || !p2 || !p) return;
-
-    // ¿Ya está en la posición objetivo?
-    if (p.hand[handIndex] === cardId) return;
-
-    // 1) Buscar dentro de ambas manos y swappear si la encontramos
-    for (let i = 0; i < 10; i++) {
-      if (p1.hand[i] === cardId) {
-        const tmp = p.hand[handIndex];
-        p1.hand[i] = tmp;
-        p.hand[handIndex] = cardId;
-        return;
-      }
-      if (p2.hand[i] === cardId) {
-        const tmp = p.hand[handIndex];
-        p2.hand[i] = tmp;
-        p.hand[handIndex] = cardId;
-        return;
-      }
-    }
-
-    // 2) Si no estaba en manos, intentar buscarla en el mazo restante
-    const start = this.state.game.deckPos; // después de repartir, apunta al siguiente bloque
-    const idx = this.state.game.deck.indexOf(cardId, start);
-    if (idx >= 0) {
-      // Cambiar por la carta que tenía el jugador en ese índice
-      const tmp = p.hand[handIndex];
-      this.state.game.deck[idx] = tmp;
-      p.hand[handIndex] = cardId;
-    }
-  }
-
   private resolveBattle() {
     const players = Array.from(this.state.players.values());
     const currentPlayer = players.find(
@@ -762,6 +725,18 @@ export class MyRoom extends Room<MyRoomState> {
       diff,
       win,
       tie,
+    });
+    currentPlayer.usedCards[this.state.game.selectedSelf] = true;
+    opponentPlayer.usedCards[this.state.game.selectedOpponent] = true;
+
+    // Avisar a todos para que atenúen visualmente esas cartas
+    this.broadcast("card_used", {
+      playerId: currentPlayer.playerId,
+      cardIndex: this.state.game.selectedSelf, // 0-based
+    });
+    this.broadcast("card_used", {
+      playerId: opponentPlayer.playerId,
+      cardIndex: this.state.game.selectedOpponent, // 0-based
     });
 
     if (win) {
