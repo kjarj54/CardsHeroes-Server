@@ -133,6 +133,13 @@ export class MyRoom extends Room<MyRoomState> {
   onJoin(client: Client, options: any) {
     console.log(`🔗 Player ${client.sessionId} joined!`);
 
+    // Verificar que no excedamos el límite de jugadores
+    if (this.state.players.size >= this.maxClients) {
+      console.log(`❌ Room full! Rejecting player ${client.sessionId}`);
+      client.leave();
+      return;
+    }
+
     const player = new Player();
     player.sessionId = client.sessionId;
     player.connected = true;
@@ -145,24 +152,62 @@ export class MyRoom extends Room<MyRoomState> {
     this.state.playerCount = this.state.players.size;
 
     console.log(`👥 Players in room: ${this.state.playerCount}/2`);
+    console.log(`🆔 Assigned player ID: ${player.playerId} to ${client.sessionId}`);
 
     client.send("session_info", {
       sessionId: client.sessionId,
       playerId: player.playerId,
     });
 
+    // Lógica de inicio/reinicio basada en el estado actual y número de jugadores
     if (this.state.playerCount === 2) {
-      this.startGame();
+      if (this.state.gameStatus === "finished" || this.state.gameStatus === "waiting") {
+        console.log("🔄 Two players connected, starting fresh game...");
+        this.restartGame();
+      } else if (this.state.gameStatus === "playing") {
+        console.log("⚠️ Game already in progress, sending current hand to reconnected player");
+        
+        // Enviar la mano actual al jugador que se acaba de conectar
+        const reconnectedPlayer = this.state.players.get(client.sessionId);
+        if (reconnectedPlayer && reconnectedPlayer.hand.length > 0) {
+          client.send("your_hand", {
+            hand: Array.from(reconnectedPlayer.hand)
+          });
+          
+          // También enviar el valor del joker actual
+          client.send("joker_value", {
+            value: this.state.game.jokerValue
+          });
+          
+          console.log(`📤 Sent current hand to reconnected player ${reconnectedPlayer.playerId}`);
+        }
+      }
+    } else {
+      console.log("⏳ Waiting for more players...");
     }
   }
 
-  onLeave(client: Client) {
+  onLeave(client: Client, consented?: boolean) {
     console.log(`👋 Player ${client.sessionId} left!`);
-    const p = this.state.players.get(client.sessionId);
-    if (p) p.connected = false;
-
-    // opcional: pausar/terminar
-    // this.state.gameStatus = "waiting";
+    
+    // Remover completamente al jugador de la sala
+    const player = this.state.players.get(client.sessionId);
+    if (player) {
+      console.log(`🗑️ Removing player ${player.playerId} from room`);
+      this.state.players.delete(client.sessionId);
+    }
+    
+    // Actualizar contador de jugadores
+    this.state.playerCount = this.state.players.size;
+    console.log(`👥 Players remaining: ${this.state.playerCount}/2`);
+    
+    // Si no quedan jugadores, resetear el estado de la sala
+    if (this.state.playerCount === 0) {
+      console.log("🔄 No players left, resetting room state...");
+      this.state.gameStatus = "waiting";
+      this.state.game.phase = "waiting";
+      this.clearTimers();
+    }
   }
 
   onDispose() {
@@ -221,8 +266,17 @@ export class MyRoom extends Room<MyRoomState> {
     });
 
     // Reiniciar juego
-    this.onMessage("restart_game", () => {
-      this.restartGame();
+    this.onMessage("restart_game", (client) => {
+      console.log(`🔄 Player ${client.sessionId} requested game restart`);
+      
+      // Solo reiniciar si hay 2 jugadores y el juego no está en una fase crítica
+      if (this.state.playerCount === 2) {
+        console.log("🔄 Restarting game as requested...");
+        this.broadcast("game_restart");
+        this.restartGame();
+      } else {
+        console.log("⚠️ Cannot restart game, not enough players");
+      }
     });
   }
 
@@ -1011,8 +1065,11 @@ export class MyRoom extends Room<MyRoomState> {
 
   private restartGame() {
     console.log("🔄 Restarting game...");
+    
+    // Limpiar todos los timers
     this.clearTimers();
 
+    // Resetear estado de jugadores
     this.state.players.forEach((p) => {
       p.score = 0;
       p.credits = 100;
@@ -1024,9 +1081,31 @@ export class MyRoom extends Room<MyRoomState> {
       p.blockedCards.clear();
     });
 
-    this.state.gameStatus = "playing";
+    // Resetear estado del juego completamente
+    this.state.gameStatus = "waiting";
+    this.state.game.phase = "betting";
     this.state.game.round = 1;
+    this.state.game.currentTurn = 1;
+    
+    // Reset battle state
+    this.state.game.selectedSelf = -1;
+    this.state.game.selectedOpponent = -1;
+    this.state.game.starterP1Idx = -1;
+    this.state.game.starterP2Idx = -1;
+    this.state.game.battleWinner = 0;
+    this.state.game.battleDiff = 0;
+    this.state.game.battleOp = "";
+    this.state.game.afterStarter = false;
+    this.state.game.battleCount = 0;
+    
+    // Notificar a los clientes que el juego se está reiniciando
+    this.broadcast("game_restart");
+    
+    // Inicializar y comenzar nuevo juego
     this.initializeDeck();
+    
+    // Cambiar estado a playing solo después de que todo esté listo
+    this.state.gameStatus = "playing";
     this.startNewRound();
   }
 
