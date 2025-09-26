@@ -374,7 +374,7 @@ export class MyRoom extends Room<MyRoomState> {
       const c2 = this.state.game.deck[startPos + 10 + i];
 
       if (c1 !== undefined) p1.hand.push(c1);
-      if (c2 !== undefined) p2.hand.push(c2);
+      if (c2 !== undefined) p2.hand.push(c2); 
 
       console.log(`🃏 Card ${i}: P1 gets ${c1}, P2 gets ${c2}`);
     }
